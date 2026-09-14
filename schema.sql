@@ -23,7 +23,7 @@ CREATE TABLE `users` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 2. Rooms Table
-CREATE TABLE `rooms` (
+CREATE TABLE IF NOT EXISTS `rooms` (
     `id` CHAR(36) NOT NULL,
     `room_code` VARCHAR(16) NOT NULL,
     `name` VARCHAR(255) NOT NULL,
@@ -32,6 +32,7 @@ CREATE TABLE `rooms` (
     `playback_state` ENUM('playing', 'paused') NOT NULL DEFAULT 'paused',
     `playback_position_ms` INT NOT NULL DEFAULT 0,
     `last_sync_timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `session_started_at` TIMESTAMP NULL DEFAULT NULL,
     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_rooms_room_code` (`room_code`),

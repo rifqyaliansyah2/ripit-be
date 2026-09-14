@@ -114,3 +114,24 @@ func (r *roomRepository) IsCodeExists(code string) (bool, error) {
 	}
 	return count > 0, nil
 }
+
+func (r *roomRepository) MarkSessionStarted(roomID string) (*time.Time, error) {
+	now := time.Now()
+	result := r.db.Model(&domain.Room{}).
+		Where("id = ? AND session_started_at IS NULL", roomID).
+		Update("session_started_at", now)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	if result.RowsAffected == 0 {
+		var room domain.Room
+		if err := r.db.Select("session_started_at").First(&room, "id = ?", roomID).Error; err != nil {
+			return nil, err
+		}
+		return room.SessionStartedAt, nil
+	}
+
+	return &now, nil
+}

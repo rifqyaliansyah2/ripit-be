@@ -251,3 +251,16 @@ func TestUUIDFormat(t *testing.T) {
 	_, err := uuid.Parse(id)
 	assert.NoError(t, err)
 }
+
+func (m *mockRoomRepo) MarkSessionStarted(roomID string) (*time.Time, error) {
+	r, ok := m.rooms[roomID]
+	if !ok {
+		return nil, nil
+	}
+	if r.SessionStartedAt != nil {
+		return r.SessionStartedAt, nil
+	}
+	now := time.Now()
+	r.SessionStartedAt = &now
+	return r.SessionStartedAt, nil
+}

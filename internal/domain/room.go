@@ -27,6 +27,7 @@ type Room struct {
 	PlaybackState      PlaybackState `json:"playback_state" gorm:"type:enum('playing','paused');default:'paused'"`
 	PlaybackPositionMS int           `json:"playback_position_ms" gorm:"type:int;default:0"`
 	LastSyncTimestamp  time.Time     `json:"last_sync_timestamp" gorm:"type:timestamp;autoUpdateTime"`
+	SessionStartedAt   *time.Time    `json:"session_started_at" gorm:"type:timestamp;default:null"`
 	CreatedAt          time.Time     `json:"created_at" gorm:"type:timestamp;autoCreateTime"`
 
 	// Associations
@@ -66,6 +67,7 @@ type RoomRepository interface {
 	GetByCode(code string) (*Room, error)
 	Update(room *Room) error
 	UpdatePlaybackState(roomID string, state PlaybackState, positionMS int, currentTrackID *string) error
+	MarkSessionStarted(roomID string) (*time.Time, error)
 	AddMember(member *RoomMember) error
 	RemoveMember(roomID, userID string) error
 	GetMembers(roomID string) ([]RoomMember, error)

@@ -3,15 +3,16 @@ package ws
 type EventType string
 
 const (
-	EventSyncPlayback EventType = "SYNC_PLAYBACK"
-	EventChangeState  EventType = "CHANGE_STATE"
-	EventQueueUpdated EventType = "QUEUE_UPDATED"
-	EventUserJoined   EventType = "USER_JOINED"
-	EventUserLeft     EventType = "USER_LEFT"
-	EventInitialState EventType = "INITIAL_STATE"
-	EventRoomClosed   EventType = "ROOM_CLOSED"
-	EventError        EventType = "ERROR"
-	EventLeaveRoom    EventType = "LEAVE_ROOM" // client -> server: explicit, intentional leave
+	EventSyncPlayback   EventType = "SYNC_PLAYBACK"
+	EventChangeState    EventType = "CHANGE_STATE"
+	EventQueueUpdated   EventType = "QUEUE_UPDATED"
+	EventUserJoined     EventType = "USER_JOINED"
+	EventUserLeft       EventType = "USER_LEFT"
+	EventInitialState   EventType = "INITIAL_STATE"
+	EventRoomClosed     EventType = "ROOM_CLOSED"
+	EventError          EventType = "ERROR"
+	EventLeaveRoom      EventType = "LEAVE_ROOM"
+	EventSessionStarted EventType = "SESSION_STARTED"
 )
 
 type WSMessage struct {
@@ -40,4 +41,8 @@ type UserPresencePayload struct {
 
 type RoomClosedPayload struct {
 	Reason string `json:"reason"`
+}
+
+type SessionStartedPayload struct {
+	SessionStartedAt string `json:"session_started_at"`
 }

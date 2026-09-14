@@ -368,6 +368,23 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		client.ExplicitLeave = true
 		h.mu.Unlock()
 
+	case EventSessionStarted:
+	if client.Role != "host" {
+		client.SendErrorMessage("Only the host can start the session")
+		return
+	}
+
+	startedAt, err := h.roomRepo.MarkSessionStarted(h.RoomID)
+	if err != nil || startedAt == nil {
+		client.SendErrorMessage("Failed to start session")
+		return
+	}
+
+	h.broadcastEvent(WSMessage{
+		Type:    EventSessionStarted,
+		Payload: SessionStartedPayload{SessionStartedAt: startedAt.Format(time.RFC3339)},
+	})
+
 	case EventSyncPlayback:
 		var payload SyncPlaybackPayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
