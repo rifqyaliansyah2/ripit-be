@@ -1,0 +1,22 @@
+# Environment
+.env
+
+# Binaries
+/bin/
+/tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build cache
+*.test
+*.out
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
