@@ -23,6 +23,7 @@ type Client struct {
 	UserID   string
 	Username string
 	Role     string
+	ExplicitLeave bool
 }
 
 func (c *Client) ReadPump() {

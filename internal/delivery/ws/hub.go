@@ -13,6 +13,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// hostReconnectGrace is how long the room stays alive after the host's
+// connection drops before it's actually torn down. Covers page navigation,
+// tab refresh, and brief network blips — anything longer than this and we
+// treat the host as genuinely gone.
+const hostReconnectGrace = 6 * time.Second
+
 type HubManager struct {
 	rooms          map[string]*RoomHub
 	mu             sync.RWMutex
@@ -139,18 +145,28 @@ type RoomHub struct {
 	roomRepo   domain.RoomRepository
 	trackRepo  domain.TrackRepository
 	mu         sync.RWMutex
+
+	// Host-disconnect grace period bookkeeping. An implicit host
+	// disconnect doesn't destroy the room immediately — it schedules a
+	// delayed check via hostLeaveTimeout, guarded by hostLeaveGen so a
+	// reconnect within the grace window (e.g. navigating pages) cancels
+	// a timer that's already in flight.
+	hostLeaveTimeout chan int
+	pendingHostTimer *time.Timer
+	hostLeaveGen     int
 }
 
 func NewRoomHub(roomID string, roomRepo domain.RoomRepository, trackRepo domain.TrackRepository, onDestroy func()) *RoomHub {
 	return &RoomHub{
-		RoomID:     roomID,
-		Clients:    make(map[*Client]bool),
-		Broadcast:  make(chan []byte),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
-		onDestroy:  onDestroy,
-		roomRepo:   roomRepo,
-		trackRepo:  trackRepo,
+		RoomID:           roomID,
+		Clients:          make(map[*Client]bool),
+		Broadcast:        make(chan []byte),
+		Register:         make(chan *Client),
+		Unregister:       make(chan *Client),
+		hostLeaveTimeout: make(chan int),
+		onDestroy:        onDestroy,
+		roomRepo:         roomRepo,
+		trackRepo:        trackRepo,
 	}
 }
 
@@ -159,6 +175,13 @@ func (h *RoomHub) Run() {
 		select {
 		case client := <-h.Register:
 			h.mu.Lock()
+			// Host reconnected within the grace window (e.g. navigated
+			// from /setup to the room page) — cancel the pending destroy.
+			if client.Role == "host" && h.pendingHostTimer != nil {
+				h.pendingHostTimer.Stop()
+				h.pendingHostTimer = nil
+				h.hostLeaveGen++
+			}
 			h.Clients[client] = true
 			h.mu.Unlock()
 
@@ -183,33 +206,20 @@ func (h *RoomHub) Run() {
 			delete(h.Clients, client)
 			close(client.Send)
 			isHost := client.Role == "host"
-
-			var remaining []*Client
-			for c := range h.Clients {
-				remaining = append(remaining, c)
-			}
+			explicit := client.ExplicitLeave
 			h.mu.Unlock()
 
 			if isHost {
-				h.broadcastEvent(WSMessage{
-					Type:    EventRoomClosed,
-					Payload: RoomClosedPayload{Reason: "host_left"},
-				})
-
-				for _, c := range remaining {
-					close(c.Send)
+				if explicit {
+					// User clicked "Leave Room" — no reason to wait.
+					h.destroyRoom()
+				} else {
+					// Connection dropped without warning (navigation,
+					// refresh, network blip) — give it a chance to
+					// reconnect before tearing the room down.
+					h.scheduleHostLeaveGrace()
 				}
-
-				_ = h.roomRepo.Delete(h.RoomID)
-
-				h.mu.Lock()
-				h.Clients = make(map[*Client]bool)
-				h.mu.Unlock()
-
-				if h.onDestroy != nil {
-					h.onDestroy()
-				}
-				return
+				continue
 			}
 
 			_ = h.roomRepo.RemoveMember(h.RoomID, client.UserID)
@@ -234,6 +244,20 @@ func (h *RoomHub) Run() {
 				return
 			}
 
+		case gen := <-h.hostLeaveTimeout:
+			h.mu.Lock()
+			if gen != h.hostLeaveGen {
+				// Stale timer — host already reconnected since this
+				// was scheduled. Ignore it.
+				h.mu.Unlock()
+				continue
+			}
+			h.pendingHostTimer = nil
+			h.mu.Unlock()
+
+			h.destroyRoom()
+			return
+
 		case message := <-h.Broadcast:
 			h.mu.RLock()
 			for client := range h.Clients {
@@ -246,6 +270,51 @@ func (h *RoomHub) Run() {
 			}
 			h.mu.RUnlock()
 		}
+	}
+}
+
+// scheduleHostLeaveGrace delays room destruction after an implicit host
+// disconnect, giving the host hostReconnectGrace to reconnect (e.g. finish
+// navigating to another page in the room) before the room is torn down.
+func (h *RoomHub) scheduleHostLeaveGrace() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.hostLeaveGen++
+	gen := h.hostLeaveGen
+	h.pendingHostTimer = time.AfterFunc(hostReconnectGrace, func() {
+		h.hostLeaveTimeout <- gen
+	})
+}
+
+// destroyRoom broadcasts ROOM_CLOSED, cuts off remaining clients, and
+// deletes the room. Called either immediately (explicit leave) or once the
+// grace window expires without the host reclaiming the room.
+func (h *RoomHub) destroyRoom() {
+	h.mu.Lock()
+	var remaining []*Client
+	for c := range h.Clients {
+		remaining = append(remaining, c)
+	}
+	h.mu.Unlock()
+
+	h.broadcastEvent(WSMessage{
+		Type:    EventRoomClosed,
+		Payload: RoomClosedPayload{Reason: "host_left"},
+	})
+
+	for _, c := range remaining {
+		close(c.Send)
+	}
+
+	_ = h.roomRepo.Delete(h.RoomID)
+
+	h.mu.Lock()
+	h.Clients = make(map[*Client]bool)
+	h.mu.Unlock()
+
+	if h.onDestroy != nil {
+		h.onDestroy()
 	}
 }
 
@@ -290,8 +359,16 @@ func (h *RoomHub) sendInitialState(client *Client) {
 
 func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []byte) {
 	switch msg.Type {
+	case EventLeaveRoom:
+		// Client is leaving on purpose. Mark it so the Unregister
+		// handler skips the grace period. The client closes its own
+		// socket right after sending this, which triggers ReadPump's
+		// deferred Unregister as usual.
+		h.mu.Lock()
+		client.ExplicitLeave = true
+		h.mu.Unlock()
+
 	case EventSyncPlayback:
-		// Payload parsing
 		var payload SyncPlaybackPayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
@@ -299,7 +376,6 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 			return
 		}
 
-		// Update database room state if host
 		if client.Role == "host" {
 			state := domain.PlaybackState(payload.PlaybackState)
 			if state != domain.PlaybackStatePlaying && state != domain.PlaybackStatePaused {
@@ -337,7 +413,6 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		})
 
 	case EventQueueUpdated:
-		// Refresh tracks and broadcast to all
 		tracks, err := h.trackRepo.GetByRoomID(h.RoomID)
 		if err == nil {
 			h.broadcastEvent(WSMessage{
@@ -349,7 +424,6 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		}
 
 	default:
-		// Re-broadcast custom user event to all peers in the room
 		h.Broadcast <- raw
 	}
 }

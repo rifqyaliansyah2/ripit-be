@@ -11,6 +11,7 @@ const (
 	EventInitialState EventType = "INITIAL_STATE"
 	EventRoomClosed   EventType = "ROOM_CLOSED"
 	EventError        EventType = "ERROR"
+	EventLeaveRoom    EventType = "LEAVE_ROOM" // client -> server: explicit, intentional leave
 )
 
 type WSMessage struct {
