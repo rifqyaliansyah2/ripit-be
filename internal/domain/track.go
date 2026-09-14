@@ -7,7 +7,7 @@ import (
 type Track struct {
 	ID         string    `json:"id" gorm:"type:char(36);primaryKey"`
 	RoomID     string    `json:"room_id" gorm:"type:char(36);not null;index"`
-	YouTubeURL string    `json:"youtube_url" gorm:"type:varchar(512);not null"`
+	YouTubeURL string    `json:"youtube_url" gorm:"column:youtube_url;type:varchar(512);not null"`
 	Title      string    `json:"title" gorm:"type:varchar(512);not null"`
 	Artist     string    `json:"artist" gorm:"type:varchar(255);not null"`
 	Duration   string    `json:"duration" gorm:"type:varchar(64);default:'0:00'"`

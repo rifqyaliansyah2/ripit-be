@@ -35,6 +35,8 @@ type Room struct {
 	CurrentTrack *Track       `json:"current_track,omitempty" gorm:"foreignKey:CurrentTrackID"`
 	Members      []RoomMember `json:"members,omitempty" gorm:"foreignKey:RoomID"`
 	Tracks       []Track      `json:"tracks,omitempty" gorm:"foreignKey:RoomID"`
+	RepeatMode   string       `json:"repeat_mode" gorm:"type:enum('off','all','one');default:'off'"`
+	IsShuffled   bool         `json:"is_shuffled" gorm:"column:is_shuffled;type:tinyint(1);default:0"`
 }
 
 type RoomMember struct {
@@ -57,7 +59,7 @@ type JoinRoomResponse struct {
 
 type SyncPlaybackRequest struct {
 	PlaybackState      PlaybackState `json:"playback_state" binding:"required,oneof=playing paused"`
-	PlaybackPositionMS int           `json:"playback_position_ms" binding:"min=0"`
+	PlaybackPositionMS *int `json:"playback_position_ms" binding:"omitempty,min=0"`
 	CurrentTrackID     *string       `json:"current_track_id,omitempty"`
 }
 
@@ -66,7 +68,7 @@ type RoomRepository interface {
 	GetByID(id string) (*Room, error)
 	GetByCode(code string) (*Room, error)
 	Update(room *Room) error
-	UpdatePlaybackState(roomID string, state PlaybackState, positionMS int, currentTrackID *string) error
+	UpdatePlaybackState(roomID string, state PlaybackState, positionMS *int, currentTrackID *string) error
 	MarkSessionStarted(roomID string) (*time.Time, error)
 	AddMember(member *RoomMember) error
 	RemoveMember(roomID, userID string) error
@@ -74,6 +76,7 @@ type RoomRepository interface {
 	GetMember(roomID, userID string) (*RoomMember, error)
 	IsCodeExists(code string) (bool, error)
 	Delete(id string) error
+	UpdatePlaybackSettings(roomID string, repeatMode string, isShuffled bool) error
 }
 
 type RoomService interface {

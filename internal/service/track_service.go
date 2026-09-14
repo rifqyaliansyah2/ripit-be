@@ -59,7 +59,8 @@ func (s *trackService) AddTrack(userID, roomID string, req *domain.AddTrackReque
 	// If room has no current track, set this track as current track automatically
 	if room.CurrentTrackID == nil || *room.CurrentTrackID == "" {
 		trackID := track.ID
-		_ = s.roomRepo.UpdatePlaybackState(roomID, domain.PlaybackStatePaused, 0, &trackID)
+		zeroPos := 0
+		_ = s.roomRepo.UpdatePlaybackState(roomID, domain.PlaybackStatePaused, &zeroPos, &trackID)
 	}
 
 	return s.trackRepo.GetByID(track.ID)
@@ -134,7 +135,8 @@ func (s *trackService) DeleteTrack(userID, roomID, trackID string) error {
 				break
 			}
 		}
-		_ = s.roomRepo.UpdatePlaybackState(roomID, domain.PlaybackStatePaused, 0, nextTrackID)
+		zeroPos := 0
+		_ = s.roomRepo.UpdatePlaybackState(roomID, domain.PlaybackStatePaused, &zeroPos, nextTrackID)
 	}
 
 	return s.trackRepo.Delete(trackID)

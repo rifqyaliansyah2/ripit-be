@@ -13,6 +13,10 @@ const (
 	EventError          EventType = "ERROR"
 	EventLeaveRoom      EventType = "LEAVE_ROOM"
 	EventSessionStarted EventType = "SESSION_STARTED"
+	EventPlaybackSettings EventType = "PLAYBACK_SETTINGS"
+	EventPing           EventType = "PING"
+	EventPong           EventType = "PONG"
+	EventHostLatency    EventType = "HOST_LATENCY"
 )
 
 type WSMessage struct {
@@ -45,4 +49,17 @@ type RoomClosedPayload struct {
 
 type SessionStartedPayload struct {
 	SessionStartedAt string `json:"session_started_at"`
+}
+
+type PlaybackSettingsPayload struct {
+    RepeatMode string `json:"repeat_mode"`
+    IsShuffled bool   `json:"is_shuffled"`
+}
+
+type PingPayload struct {
+	SentAt int64 `json:"sent_at"`
+}
+
+type HostLatencyPayload struct {
+	LatencyMS int64 `json:"latency_ms"`
 }

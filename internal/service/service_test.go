@@ -63,10 +63,12 @@ func (m *mockRoomRepo) Update(r *domain.Room) error {
 	return nil
 }
 
-func (m *mockRoomRepo) UpdatePlaybackState(roomID string, state domain.PlaybackState, pos int, trackID *string) error {
+func (m *mockRoomRepo) UpdatePlaybackState(roomID string, state domain.PlaybackState, pos *int, trackID *string) error {
 	if r, ok := m.rooms[roomID]; ok {
 		r.PlaybackState = state
-		r.PlaybackPositionMS = pos
+		if pos != nil {
+			r.PlaybackPositionMS = *pos
+		}
 		if trackID != nil {
 			r.CurrentTrackID = trackID
 		}
@@ -263,4 +265,12 @@ func (m *mockRoomRepo) MarkSessionStarted(roomID string) (*time.Time, error) {
 	now := time.Now()
 	r.SessionStartedAt = &now
 	return r.SessionStartedAt, nil
+}
+
+func (m *mockRoomRepo) UpdatePlaybackSettings(roomID string, repeatMode string, isShuffled bool) error {
+	if r, ok := m.rooms[roomID]; ok {
+		r.RepeatMode = repeatMode
+		r.IsShuffled = isShuffled
+	}
+	return nil
 }

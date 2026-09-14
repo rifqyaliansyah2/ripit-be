@@ -369,21 +369,21 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		h.mu.Unlock()
 
 	case EventSessionStarted:
-	if client.Role != "host" {
-		client.SendErrorMessage("Only the host can start the session")
-		return
-	}
+		if client.Role != "host" {
+			client.SendErrorMessage("Only the host can start the session")
+			return
+		}
 
-	startedAt, err := h.roomRepo.MarkSessionStarted(h.RoomID)
-	if err != nil || startedAt == nil {
-		client.SendErrorMessage("Failed to start session")
-		return
-	}
+		startedAt, err := h.roomRepo.MarkSessionStarted(h.RoomID)
+		if err != nil || startedAt == nil {
+			client.SendErrorMessage("Failed to start session")
+			return
+		}
 
-	h.broadcastEvent(WSMessage{
-		Type:    EventSessionStarted,
-		Payload: SessionStartedPayload{SessionStartedAt: startedAt.Format(time.RFC3339)},
-	})
+		h.broadcastEvent(WSMessage{
+			Type:    EventSessionStarted,
+			Payload: SessionStartedPayload{SessionStartedAt: startedAt.Format(time.RFC3339)},
+		})
 
 	case EventSyncPlayback:
 		var payload SyncPlaybackPayload
@@ -398,7 +398,7 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 			if state != domain.PlaybackStatePlaying && state != domain.PlaybackStatePaused {
 				state = domain.PlaybackStatePaused
 			}
-			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, payload.PlaybackPositionMS, payload.CurrentTrackID)
+			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, &payload.PlaybackPositionMS, payload.CurrentTrackID)
 		}
 
 		payload.Timestamp = time.Now().UnixMilli()
@@ -417,11 +417,7 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 
 		if client.Role == "host" {
 			state := domain.PlaybackState(payload.PlaybackState)
-			pos := 0
-			if payload.PositionMS != nil {
-				pos = *payload.PositionMS
-			}
-			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, pos, nil)
+			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, payload.PositionMS, nil)
 		}
 
 		h.broadcastEvent(WSMessage{
@@ -439,6 +435,58 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 				},
 			})
 		}
+
+	case EventPlaybackSettings:
+		if client.Role != "host" {
+			client.SendErrorMessage("Only the host can change playback settings")
+			return
+		}
+
+		var payload PlaybackSettingsPayload
+		payloadBytes, _ := json.Marshal(msg.Payload)
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			client.SendErrorMessage("Invalid PLAYBACK_SETTINGS payload")
+			return
+		}
+
+		if payload.RepeatMode != "off" && payload.RepeatMode != "all" && payload.RepeatMode != "one" {
+			payload.RepeatMode = "off"
+		}
+
+		_ = h.roomRepo.UpdatePlaybackSettings(h.RoomID, payload.RepeatMode, payload.IsShuffled)
+
+		h.broadcastEvent(WSMessage{
+			Type:    EventPlaybackSettings,
+			Payload: payload,
+		})
+
+	case EventPing:
+		if client.Role != "host" {
+			return
+		}
+		var payload PingPayload
+		payloadBytes, _ := json.Marshal(msg.Payload)
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			return
+		}
+		resp, err := json.Marshal(WSMessage{Type: EventPong, Payload: payload})
+		if err == nil {
+			select {
+			case client.Send <- resp:
+			default:
+			}
+		}
+
+	case EventHostLatency:
+		if client.Role != "host" {
+			return
+		}
+		var payload HostLatencyPayload
+		payloadBytes, _ := json.Marshal(msg.Payload)
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			return
+		}
+		h.broadcastEvent(WSMessage{Type: EventHostLatency, Payload: payload})
 
 	default:
 		h.Broadcast <- raw

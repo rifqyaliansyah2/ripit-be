@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS `rooms` (
     `current_track_id` CHAR(36) NULL DEFAULT NULL,
     `playback_state` ENUM('playing', 'paused') NOT NULL DEFAULT 'paused',
     `playback_position_ms` INT NOT NULL DEFAULT 0,
+    `repeat_mode` ENUM('off', 'all', 'one') NOT NULL DEFAULT 'off',
+    `is_shuffled` BOOLEAN NOT NULL DEFAULT FALSE,
     `last_sync_timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `session_started_at` TIMESTAMP NULL DEFAULT NULL,
     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

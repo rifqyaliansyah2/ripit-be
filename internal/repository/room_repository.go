@@ -67,17 +67,27 @@ func (r *roomRepository) Update(room *domain.Room) error {
 	return r.db.Save(room).Error
 }
 
-func (r *roomRepository) UpdatePlaybackState(roomID string, state domain.PlaybackState, positionMS int, currentTrackID *string) error {
+func (r *roomRepository) UpdatePlaybackState(roomID string, state domain.PlaybackState, positionMS *int, currentTrackID *string) error {
 	updates := map[string]interface{}{
-		"playback_state":       state,
-		"playback_position_ms": positionMS,
-		"last_sync_timestamp":  time.Now(),
+		"playback_state":      state,
+		"last_sync_timestamp": time.Now(),
+	}
+	if positionMS != nil {
+		updates["playback_position_ms"] = *positionMS
 	}
 	if currentTrackID != nil {
 		updates["current_track_id"] = *currentTrackID
 	}
-
 	return r.db.Model(&domain.Room{}).Where("id = ?", roomID).Updates(updates).Error
+}
+
+func (r *roomRepository) UpdatePlaybackSettings(roomID string, repeatMode string, isShuffled bool) error {
+    return r.db.Model(&domain.Room{}).
+        Where("id = ?", roomID).
+        Updates(map[string]interface{}{
+            "repeat_mode": repeatMode,
+            "is_shuffled": isShuffled,
+        }).Error
 }
 
 func (r *roomRepository) AddMember(member *domain.RoomMember) error {
