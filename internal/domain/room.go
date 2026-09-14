@@ -71,6 +71,7 @@ type RoomRepository interface {
 	GetMembers(roomID string) ([]RoomMember, error)
 	GetMember(roomID, userID string) (*RoomMember, error)
 	IsCodeExists(code string) (bool, error)
+	Delete(id string) error
 }
 
 type RoomService interface {

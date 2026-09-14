@@ -21,6 +21,10 @@ func (r *roomRepository) Create(room *domain.Room) error {
 	return r.db.Create(room).Error
 }
 
+func (r *roomRepository) Delete(id string) error {
+	return r.db.Where("id = ?", id).Delete(&domain.Room{}).Error
+}
+
 func (r *roomRepository) GetByID(id string) (*domain.Room, error) {
 	var room domain.Room
 	err := r.db.Preload("Host").

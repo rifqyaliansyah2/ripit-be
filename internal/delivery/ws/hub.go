@@ -14,12 +14,12 @@ import (
 )
 
 type HubManager struct {
-	rooms      map[string]*RoomHub
-	mu         sync.RWMutex
-	roomRepo   domain.RoomRepository
-	userRepo   domain.UserRepository
-	trackRepo  domain.TrackRepository
-	upgrader   websocket.Upgrader
+	rooms          map[string]*RoomHub
+	mu             sync.RWMutex
+	roomRepo       domain.RoomRepository
+	userRepo       domain.UserRepository
+	trackRepo      domain.TrackRepository
+	upgrader       websocket.Upgrader
 	allowedOrigins map[string]bool
 }
 
@@ -162,10 +162,8 @@ func (h *RoomHub) Run() {
 			h.Clients[client] = true
 			h.mu.Unlock()
 
-			// Send initial room state to newly joined client
 			h.sendInitialState(client)
 
-			// Broadcast presence join event
 			h.broadcastEvent(WSMessage{
 				Type: EventUserJoined,
 				Payload: UserPresencePayload{
@@ -177,14 +175,45 @@ func (h *RoomHub) Run() {
 
 		case client := <-h.Unregister:
 			h.mu.Lock()
-			if _, ok := h.Clients[client]; ok {
-				delete(h.Clients, client)
-				close(client.Send)
+			_, existed := h.Clients[client]
+			if !existed {
+				h.mu.Unlock()
+				continue
 			}
-			empty := len(h.Clients) == 0
+			delete(h.Clients, client)
+			close(client.Send)
+			isHost := client.Role == "host"
+
+			var remaining []*Client
+			for c := range h.Clients {
+				remaining = append(remaining, c)
+			}
 			h.mu.Unlock()
 
-			// Broadcast presence left event
+			if isHost {
+				h.broadcastEvent(WSMessage{
+					Type:    EventRoomClosed,
+					Payload: RoomClosedPayload{Reason: "host_left"},
+				})
+
+				for _, c := range remaining {
+					close(c.Send)
+				}
+
+				_ = h.roomRepo.Delete(h.RoomID)
+
+				h.mu.Lock()
+				h.Clients = make(map[*Client]bool)
+				h.mu.Unlock()
+
+				if h.onDestroy != nil {
+					h.onDestroy()
+				}
+				return
+			}
+
+			_ = h.roomRepo.RemoveMember(h.RoomID, client.UserID)
+
 			h.broadcastEvent(WSMessage{
 				Type: EventUserLeft,
 				Payload: UserPresencePayload{
@@ -194,7 +223,10 @@ func (h *RoomHub) Run() {
 				},
 			})
 
-			// Clean up hub if empty
+			h.mu.RLock()
+			empty := len(h.Clients) == 0
+			h.mu.RUnlock()
+
 			if empty {
 				if h.onDestroy != nil {
 					h.onDestroy()

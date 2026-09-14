@@ -105,6 +105,11 @@ func (m *mockRoomRepo) IsCodeExists(code string) (bool, error) {
 	return false, nil
 }
 
+func (m *mockRoomRepo) Delete(id string) error {
+	delete(m.rooms, id)
+	return nil
+}
+
 type mockTrackRepo struct {
 	tracks map[string]*domain.Track
 }

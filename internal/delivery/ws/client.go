@@ -27,7 +27,7 @@ type Client struct {
 
 func (c *Client) ReadPump() {
 	defer func() {
-		c.Hub.Unregister <- c
+		go func() { c.Hub.Unregister <- c }()
 		c.Conn.Close()
 	}()
 
@@ -53,7 +53,6 @@ func (c *Client) ReadPump() {
 			continue
 		}
 
-		// Forward to Room Hub for processing
 		c.Hub.HandleIncomingMessage(c, &incoming, message)
 	}
 }
