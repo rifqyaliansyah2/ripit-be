@@ -10,13 +10,14 @@ import (
 )
 
 type RouterDependencies struct {
-	Config         *config.Config
-	TokenMaker     *jwt.TokenMaker
-	UserHandler    *UserHandler
-	RoomHandler    *RoomHandler
-	TrackHandler   *TrackHandler
-	YouTubeHandler *YouTubeHandler
-	HubManager     *ws.HubManager
+	Config          *config.Config
+	TokenMaker      *jwt.TokenMaker
+	UserHandler     *UserHandler
+	RoomHandler     *RoomHandler
+	TrackHandler    *TrackHandler
+	YouTubeHandler  *YouTubeHandler
+	WSTicketHandler *WSTicketHandler
+	HubManager      *ws.HubManager
 }
 
 func SetupRouter(deps *RouterDependencies) *gin.Engine {
@@ -40,9 +41,10 @@ func SetupRouter(deps *RouterDependencies) *gin.Engine {
 	})
 
 	// WebSocket Endpoint
-	// ws://host/ws/rooms/:id?token=...
+	// ws://host/ws/rooms/:id?ticket=... — auth is done inside HandleWS via a
+	// short-lived single-use ticket (see POST /api/v1/ws-ticket), NOT via
+	// AuthMiddleware/JWT, so the long-lived JWT never travels in this URL.
 	wsGroup := router.Group("/ws")
-	wsGroup.Use(AuthMiddleware(deps.TokenMaker))
 	{
 		wsGroup.GET("/rooms/:id", deps.HubManager.HandleWS)
 	}
@@ -56,6 +58,9 @@ func SetupRouter(deps *RouterDependencies) *gin.Engine {
 			users.POST("", deps.UserHandler.RegisterGuest)
 			users.GET("/me", AuthMiddleware(deps.TokenMaker), deps.UserHandler.GetProfile)
 		}
+
+		// Exchanges a valid Bearer JWT for a short-lived WS connection ticket.
+		v1.POST("/ws-ticket", AuthMiddleware(deps.TokenMaker), deps.WSTicketHandler.IssueTicket)
 
 		// YouTube helper
 		v1.POST("/youtube/check", deps.YouTubeHandler.Check)

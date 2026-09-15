@@ -17,6 +17,7 @@ import (
 	"ripit-be/pkg/database"
 	"ripit-be/pkg/jwt"
 	"ripit-be/pkg/logger"
+	"ripit-be/pkg/wsticket"
 )
 
 func main() {
@@ -42,26 +43,29 @@ func main() {
 
 	// 4. Initialize Utilities & Services
 	tokenMaker := jwt.NewTokenMaker(cfg.JWTSecret, cfg.JWTExpirationHours)
+	ticketStore := wsticket.NewStore()
 	userService := service.NewUserService(userRepo, tokenMaker)
 	roomService := service.NewRoomService(roomRepo, userRepo, trackRepo)
 	trackService := service.NewTrackService(trackRepo, roomRepo)
 	youtubeService := service.NewYouTubeService(cfg.YouTubeAPIKey)
 
 	// 5. Initialize Delivery Layer (HTTP & WebSockets)
-	hubManager := deliveryWS.NewHubManager(roomRepo, userRepo, trackRepo, cfg.CORSAllowedOrigins)
+	hubManager := deliveryWS.NewHubManager(roomRepo, userRepo, trackRepo, ticketStore, cfg.CORSAllowedOrigins)
 	userHandler := deliveryHTTP.NewUserHandler(userService)
 	roomHandler := deliveryHTTP.NewRoomHandler(roomService)
 	trackHandler := deliveryHTTP.NewTrackHandler(trackService)
 	youtubeHandler := deliveryHTTP.NewYouTubeHandler(youtubeService)
+	wsTicketHandler := deliveryHTTP.NewWSTicketHandler(ticketStore)
 
 	router := deliveryHTTP.SetupRouter(&deliveryHTTP.RouterDependencies{
-		Config:         cfg,
-		TokenMaker:     tokenMaker,
-		UserHandler:    userHandler,
-		RoomHandler:    roomHandler,
-		TrackHandler:   trackHandler,
-		YouTubeHandler: youtubeHandler,
-		HubManager:     hubManager,
+		Config:          cfg,
+		TokenMaker:      tokenMaker,
+		UserHandler:     userHandler,
+		RoomHandler:     roomHandler,
+		TrackHandler:    trackHandler,
+		YouTubeHandler:  youtubeHandler,
+		WSTicketHandler: wsTicketHandler,
+		HubManager:      hubManager,
 	})
 
 	serverAddr := fmt.Sprintf("%s:%s", cfg.ServerHost, cfg.ServerPort)

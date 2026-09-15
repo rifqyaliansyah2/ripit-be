@@ -8,15 +8,12 @@ import (
 	"time"
 
 	"ripit-be/internal/domain"
+	"ripit-be/pkg/wsticket"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
-// hostReconnectGrace is how long the room stays alive after the host's
-// connection drops before it's actually torn down. Covers page navigation,
-// tab refresh, and brief network blips — anything longer than this and we
-// treat the host as genuinely gone.
 const hostReconnectGrace = 6 * time.Second
 
 type HubManager struct {
@@ -25,11 +22,12 @@ type HubManager struct {
 	roomRepo       domain.RoomRepository
 	userRepo       domain.UserRepository
 	trackRepo      domain.TrackRepository
+	ticketStore    *wsticket.Store
 	upgrader       websocket.Upgrader
 	allowedOrigins map[string]bool
 }
 
-func NewHubManager(roomRepo domain.RoomRepository, userRepo domain.UserRepository, trackRepo domain.TrackRepository, allowedOrigins []string) *HubManager {
+func NewHubManager(roomRepo domain.RoomRepository, userRepo domain.UserRepository, trackRepo domain.TrackRepository, ticketStore *wsticket.Store, allowedOrigins []string) *HubManager {
 	originMap := make(map[string]bool)
 	for _, o := range allowedOrigins {
 		originMap[o] = true
@@ -40,6 +38,7 @@ func NewHubManager(roomRepo domain.RoomRepository, userRepo domain.UserRepositor
 		roomRepo:       roomRepo,
 		userRepo:       userRepo,
 		trackRepo:      trackRepo,
+		ticketStore:    ticketStore,
 		allowedOrigins: originMap,
 	}
 
@@ -86,20 +85,21 @@ func (hm *HubManager) HandleWS(c *gin.Context) {
 		return
 	}
 
-	userIDVal, exists := c.Get("userID")
-	if !exists {
+	ticket := c.Query("ticket")
+	if ticket == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	userID := userIDVal.(string)
 
-	usernameVal, _ := c.Get("username")
-	username := "Guest"
-	if usernameVal != nil {
-		username = usernameVal.(string)
+	userID, username, ok := hm.ticketStore.Consume(ticket)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired ticket"})
+		return
+	}
+	if username == "" {
+		username = "Guest"
 	}
 
-	// Verify room exists
 	room, err := hm.roomRepo.GetByID(roomID)
 	if err != nil || room == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "room not found"})
@@ -134,7 +134,6 @@ func (hm *HubManager) HandleWS(c *gin.Context) {
 	go client.ReadPump()
 }
 
-// RoomHub maintains the set of active clients and broadcasts messages to the room.
 type RoomHub struct {
 	RoomID     string
 	Clients    map[*Client]bool
@@ -146,11 +145,6 @@ type RoomHub struct {
 	trackRepo  domain.TrackRepository
 	mu         sync.RWMutex
 
-	// Host-disconnect grace period bookkeeping. An implicit host
-	// disconnect doesn't destroy the room immediately — it schedules a
-	// delayed check via hostLeaveTimeout, guarded by hostLeaveGen so a
-	// reconnect within the grace window (e.g. navigating pages) cancels
-	// a timer that's already in flight.
 	hostLeaveTimeout chan int
 	pendingHostTimer *time.Timer
 	hostLeaveGen     int
@@ -175,8 +169,6 @@ func (h *RoomHub) Run() {
 		select {
 		case client := <-h.Register:
 			h.mu.Lock()
-			// Host reconnected within the grace window (e.g. navigated
-			// from /setup to the room page) — cancel the pending destroy.
 			if client.Role == "host" && h.pendingHostTimer != nil {
 				h.pendingHostTimer.Stop()
 				h.pendingHostTimer = nil
@@ -211,12 +203,8 @@ func (h *RoomHub) Run() {
 
 			if isHost {
 				if explicit {
-					// User clicked "Leave Room" — no reason to wait.
 					h.destroyRoom()
 				} else {
-					// Connection dropped without warning (navigation,
-					// refresh, network blip) — give it a chance to
-					// reconnect before tearing the room down.
 					h.scheduleHostLeaveGrace()
 				}
 				continue
@@ -247,8 +235,6 @@ func (h *RoomHub) Run() {
 		case gen := <-h.hostLeaveTimeout:
 			h.mu.Lock()
 			if gen != h.hostLeaveGen {
-				// Stale timer — host already reconnected since this
-				// was scheduled. Ignore it.
 				h.mu.Unlock()
 				continue
 			}
@@ -273,9 +259,6 @@ func (h *RoomHub) Run() {
 	}
 }
 
-// scheduleHostLeaveGrace delays room destruction after an implicit host
-// disconnect, giving the host hostReconnectGrace to reconnect (e.g. finish
-// navigating to another page in the room) before the room is torn down.
 func (h *RoomHub) scheduleHostLeaveGrace() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -287,9 +270,6 @@ func (h *RoomHub) scheduleHostLeaveGrace() {
 	})
 }
 
-// destroyRoom broadcasts ROOM_CLOSED, cuts off remaining clients, and
-// deletes the room. Called either immediately (explicit leave) or once the
-// grace window expires without the host reclaiming the room.
 func (h *RoomHub) destroyRoom() {
 	h.mu.Lock()
 	var remaining []*Client
@@ -360,10 +340,6 @@ func (h *RoomHub) sendInitialState(client *Client) {
 func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []byte) {
 	switch msg.Type {
 	case EventLeaveRoom:
-		// Client is leaving on purpose. Mark it so the Unregister
-		// handler skips the grace period. The client closes its own
-		// socket right after sending this, which triggers ReadPump's
-		// deferred Unregister as usual.
 		h.mu.Lock()
 		client.ExplicitLeave = true
 		h.mu.Unlock()
@@ -437,11 +413,6 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		}
 
 	case EventPlaybackSettings:
-		if client.Role != "host" {
-			client.SendErrorMessage("Only the host can change playback settings")
-			return
-		}
-
 		var payload PlaybackSettingsPayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
@@ -461,9 +432,6 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		})
 
 	case EventPing:
-		if client.Role != "host" {
-			return
-		}
 		var payload PingPayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
