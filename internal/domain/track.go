@@ -31,11 +31,14 @@ type AddTrackRequest struct {
 }
 
 type UpdateTrackRequest struct {
-	Title     *string `json:"title,omitempty"`
-	Artist    *string `json:"artist,omitempty"`
-	Lyrics    *string `json:"lyrics,omitempty"`
-	HasLyrics *bool   `json:"has_lyrics,omitempty"`
-	SortOrder *int    `json:"sort_order,omitempty"`
+    Title      *string `json:"title,omitempty"`
+    Artist     *string `json:"artist,omitempty"`
+    YouTubeURL *string `json:"youtube_url,omitempty"`  
+    CoverURL   *string `json:"cover_url,omitempty"`    
+    Duration   *string `json:"duration,omitempty"`     
+    Lyrics     *string `json:"lyrics,omitempty"`
+    HasLyrics  *bool   `json:"has_lyrics,omitempty"`
+    SortOrder  *int    `json:"sort_order,omitempty"`
 }
 
 type ReorderTracksRequest struct {

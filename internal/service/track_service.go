@@ -82,36 +82,45 @@ func (s *trackService) GetTrackByID(trackID string) (*domain.Track, error) {
 }
 
 func (s *trackService) UpdateTrack(userID, roomID, trackID string, req *domain.UpdateTrackRequest) (*domain.Track, error) {
-	track, err := s.trackRepo.GetByID(trackID)
-	if err != nil {
-		return nil, err
-	}
-	if track == nil || track.RoomID != roomID {
-		return nil, errors.New("track not found in this room")
-	}
+    track, err := s.trackRepo.GetByID(trackID)
+    if err != nil {
+        return nil, err
+    }
+    if track == nil || track.RoomID != roomID {
+        return nil, errors.New("track not found in this room")
+    }
 
-	if req.Title != nil {
-		track.Title = *req.Title
-	}
-	if req.Artist != nil {
-		track.Artist = *req.Artist
-	}
-	if req.Lyrics != nil {
-		track.Lyrics = req.Lyrics
-		track.HasLyrics = len(*req.Lyrics) > 0
-	}
-	if req.HasLyrics != nil {
-		track.HasLyrics = *req.HasLyrics
-	}
-	if req.SortOrder != nil {
-		track.SortOrder = *req.SortOrder
-	}
+    if req.Title != nil {
+        track.Title = *req.Title
+    }
+    if req.Artist != nil {
+        track.Artist = *req.Artist
+    }
+    if req.YouTubeURL != nil {
+        track.YouTubeURL = *req.YouTubeURL
+    }
+    if req.CoverURL != nil {
+        track.CoverURL = *req.CoverURL
+    }
+    if req.Duration != nil {
+        track.Duration = *req.Duration
+    }
+    if req.Lyrics != nil {
+        track.Lyrics = req.Lyrics
+        track.HasLyrics = len(*req.Lyrics) > 0
+    }
+    if req.HasLyrics != nil {
+        track.HasLyrics = *req.HasLyrics
+    }
+    if req.SortOrder != nil {
+        track.SortOrder = *req.SortOrder
+    }
 
-	if err := s.trackRepo.Update(track); err != nil {
-		return nil, err
-	}
+    if err := s.trackRepo.Update(track); err != nil {
+        return nil, err
+    }
 
-	return s.trackRepo.GetByID(track.ID)
+    return s.trackRepo.GetByID(track.ID)
 }
 
 func (s *trackService) DeleteTrack(userID, roomID, trackID string) error {
