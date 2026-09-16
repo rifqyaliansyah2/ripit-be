@@ -13,16 +13,18 @@ import (
 )
 
 type roomService struct {
-	roomRepo  domain.RoomRepository
-	userRepo  domain.UserRepository
-	trackRepo domain.TrackRepository
+	roomRepo      domain.RoomRepository
+	userRepo      domain.UserRepository
+	trackRepo     domain.TrackRepository
+	playbackCache domain.PlaybackCache
 }
 
-func NewRoomService(roomRepo domain.RoomRepository, userRepo domain.UserRepository, trackRepo domain.TrackRepository) domain.RoomService {
+func NewRoomService(roomRepo domain.RoomRepository, userRepo domain.UserRepository, trackRepo domain.TrackRepository, playbackCache domain.PlaybackCache) domain.RoomService {
 	return &roomService{
-		roomRepo:  roomRepo,
-		userRepo:  userRepo,
-		trackRepo: trackRepo,
+		roomRepo:      roomRepo,
+		userRepo:      userRepo,
+		trackRepo:     trackRepo,
+		playbackCache: playbackCache,
 	}
 }
 
@@ -101,6 +103,7 @@ func (s *roomService) GetRoomByCode(code string) (*domain.Room, error) {
 	if room == nil {
 		return nil, errors.New("room not found")
 	}
+	s.overlayPlaybackCache(room)
 	return room, nil
 }
 
@@ -112,7 +115,26 @@ func (s *roomService) GetRoomByID(roomID string) (*domain.Room, error) {
 	if room == nil {
 		return nil, errors.New("room not found")
 	}
+	s.overlayPlaybackCache(room)
 	return room, nil
+}
+
+// overlayPlaybackCache patches a freshly-loaded (MySQL) room with the live
+// playback state from Redis, if any is cached. This matters because
+// UpdatePlayback returns immediately after writing Redis and only persists
+// to MySQL in the background, so MySQL's copy can briefly lag behind. If
+// Redis has nothing (cache expired, or never written), the room just keeps
+// whatever MySQL had — no error, no crash.
+func (s *roomService) overlayPlaybackCache(room *domain.Room) {
+	snapshot, err := s.playbackCache.GetPlaybackState(room.ID)
+	if err != nil || snapshot == nil {
+		return
+	}
+	room.PlaybackState = snapshot.PlaybackState
+	room.PlaybackPositionMS = snapshot.PlaybackPositionMS
+	if snapshot.CurrentTrackID != nil {
+		room.CurrentTrackID = snapshot.CurrentTrackID
+	}
 }
 
 func (s *roomService) JoinRoom(userID, roomCode string) (*JoinRoomResponse, error) {
@@ -180,11 +202,35 @@ func (s *roomService) UpdatePlayback(userID, roomID string, req *domain.SyncPlay
 		}
 	}
 
-	if err := s.roomRepo.UpdatePlaybackState(roomID, req.PlaybackState, req.PlaybackPositionMS, req.CurrentTrackID); err != nil {
+	positionMS := room.PlaybackPositionMS
+	if req.PlaybackPositionMS != nil {
+		positionMS = *req.PlaybackPositionMS
+	}
+	currentTrackID := room.CurrentTrackID
+	if req.CurrentTrackID != nil {
+		currentTrackID = req.CurrentTrackID
+	}
+
+	// Fast path: this is what the response and every listener's next read
+	// actually sees. Redis write latency is low enough it doesn't matter
+	// that we're on the request's hot path here.
+	if err := s.playbackCache.SetPlaybackState(roomID, req.PlaybackState, positionMS, currentTrackID); err != nil {
 		return nil, err
 	}
 
-	return s.roomRepo.GetByID(roomID)
+	// Slow path: MySQL stays the durable copy (survives Redis restarts/
+	// evictions), but writing it happens off the request path so a slow
+	// query never delays the response or blocks the next heartbeat.
+	go func() {
+		_ = s.roomRepo.UpdatePlaybackState(roomID, req.PlaybackState, req.PlaybackPositionMS, req.CurrentTrackID)
+	}()
+
+	room.PlaybackState = req.PlaybackState
+	room.PlaybackPositionMS = positionMS
+	room.CurrentTrackID = currentTrackID
+	room.LastSyncTimestamp = time.Now()
+
+	return room, nil
 }
 
 func (s *roomService) GetRoomMembers(roomID string) ([]domain.RoomMember, error) {

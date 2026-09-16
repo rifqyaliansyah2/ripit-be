@@ -59,8 +59,19 @@ type JoinRoomResponse struct {
 
 type SyncPlaybackRequest struct {
 	PlaybackState      PlaybackState `json:"playback_state" binding:"required,oneof=playing paused"`
-	PlaybackPositionMS *int `json:"playback_position_ms" binding:"omitempty,min=0"`
+	PlaybackPositionMS *int          `json:"playback_position_ms" binding:"omitempty,min=0"`
 	CurrentTrackID     *string       `json:"current_track_id,omitempty"`
+}
+
+// PlaybackSnapshot is the live, low-latency view of a room's playback
+// state as held in Redis. It mirrors the playback-related fields on Room
+// but is written/read independently of MySQL so hot-path updates (heartbeat,
+// seek, play/pause) don't pay MySQL's write latency.
+type PlaybackSnapshot struct {
+	PlaybackState      PlaybackState
+	PlaybackPositionMS int
+	CurrentTrackID     *string
+	UpdatedAt          time.Time
 }
 
 type RoomRepository interface {
@@ -77,6 +88,16 @@ type RoomRepository interface {
 	IsCodeExists(code string) (bool, error)
 	Delete(id string) error
 	UpdatePlaybackSettings(roomID string, repeatMode string, isShuffled bool) error
+}
+
+// PlaybackCache is the Redis-backed store for live playback state. It's
+// intentionally separate from RoomRepository: this is fast, ephemeral state
+// (safe to lose on restart — the room falls back to MySQL's last persisted
+// value), not the durable source of truth.
+type PlaybackCache interface {
+	SetPlaybackState(roomID string, state PlaybackState, positionMS int, currentTrackID *string) error
+	GetPlaybackState(roomID string) (*PlaybackSnapshot, error)
+	DeletePlaybackState(roomID string) error
 }
 
 type RoomService interface {

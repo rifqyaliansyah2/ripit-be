@@ -22,6 +22,10 @@ type Config struct {
 	DBMaxOpenConns        int
 	DBMaxIdleConns        int
 	DBConnMaxLifetime     time.Duration
+	RedisHost             string
+	RedisPort             string
+	RedisPassword         string
+	RedisDB               int
 	JWTSecret             string
 	JWTExpirationHours    int
 	CORSAllowedOrigins    []string
@@ -48,6 +52,10 @@ func LoadConfig() *Config {
 		DBMaxOpenConns:        getEnvAsInt("DB_MAX_OPEN_CONNS", 25),
 		DBMaxIdleConns:        getEnvAsInt("DB_MAX_IDLE_CONNS", 10),
 		DBConnMaxLifetime:     getEnvAsDuration("DB_CONN_MAX_LIFETIME", 5*time.Minute),
+		RedisHost:             getEnv("REDIS_HOST", "127.0.0.1"),
+		RedisPort:             getEnv("REDIS_PORT", "6379"),
+		RedisPassword:         getEnv("REDIS_PASSWORD", ""),
+		RedisDB:               getEnvAsInt("REDIS_DB", 0),
 		JWTSecret:             getEnv("JWT_SECRET", "super_secret_jwt_key_change_in_production"),
 		JWTExpirationHours:    getEnvAsInt("JWT_EXPIRATION_HOURS", 72),
 		CORSAllowedOrigins:    getEnvAsSlice("CORS_ALLOWED_ORIGINS", []string{"http://localhost:3000", "http://localhost:5173", "http://localhost:8080"}),

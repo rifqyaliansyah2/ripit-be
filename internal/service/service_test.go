@@ -164,6 +164,37 @@ func (m *mockTrackRepo) UpdateSortOrders(roomID string, orderMap map[string]int)
 	return nil
 }
 
+type mockPlaybackCache struct {
+	states map[string]*domain.PlaybackSnapshot
+}
+
+func (m *mockPlaybackCache) SetPlaybackState(roomID string, state domain.PlaybackState, positionMS int, currentTrackID *string) error {
+	if m.states == nil {
+		m.states = make(map[string]*domain.PlaybackSnapshot)
+	}
+	m.states[roomID] = &domain.PlaybackSnapshot{
+		PlaybackState:      state,
+		PlaybackPositionMS: positionMS,
+		CurrentTrackID:     currentTrackID,
+		UpdatedAt:          time.Now(),
+	}
+	return nil
+}
+
+func (m *mockPlaybackCache) GetPlaybackState(roomID string) (*domain.PlaybackSnapshot, error) {
+	if m.states == nil {
+		return nil, nil
+	}
+	return m.states[roomID], nil
+}
+
+func (m *mockPlaybackCache) DeletePlaybackState(roomID string) error {
+	if m.states != nil {
+		delete(m.states, roomID)
+	}
+	return nil
+}
+
 func TestUserService_RegisterGuest(t *testing.T) {
 	userRepo := &mockUserRepo{users: make(map[string]*domain.User)}
 	tokenMaker := jwt.NewTokenMaker("test_secret_key_1234567890", 24)
@@ -191,8 +222,9 @@ func TestRoomService_CreateAndJoinRoom(t *testing.T) {
 	}}
 	roomRepo := &mockRoomRepo{rooms: make(map[string]*domain.Room), members: make(map[string][]domain.RoomMember)}
 	trackRepo := &mockTrackRepo{tracks: make(map[string]*domain.Track)}
+	playbackCache := &mockPlaybackCache{states: make(map[string]*domain.PlaybackSnapshot)}
 
-	svc := service.NewRoomService(roomRepo, userRepo, trackRepo)
+	svc := service.NewRoomService(roomRepo, userRepo, trackRepo, playbackCache)
 
 	// Create Room
 	room, err := svc.CreateRoom("u1", &domain.CreateRoomRequest{Name: "Party Room"})

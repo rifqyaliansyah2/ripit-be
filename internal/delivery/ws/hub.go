@@ -26,12 +26,13 @@ type HubManager struct {
 	roomRepo       domain.RoomRepository
 	userRepo       domain.UserRepository
 	trackRepo      domain.TrackRepository
+	playbackCache  domain.PlaybackCache
 	ticketStore    *wsticket.Store
 	upgrader       websocket.Upgrader
 	allowedOrigins map[string]bool
 }
 
-func NewHubManager(roomRepo domain.RoomRepository, userRepo domain.UserRepository, trackRepo domain.TrackRepository, ticketStore *wsticket.Store, allowedOrigins []string) *HubManager {
+func NewHubManager(roomRepo domain.RoomRepository, userRepo domain.UserRepository, trackRepo domain.TrackRepository, playbackCache domain.PlaybackCache, ticketStore *wsticket.Store, allowedOrigins []string) *HubManager {
 	originMap := make(map[string]bool)
 	for _, o := range allowedOrigins {
 		originMap[o] = true
@@ -42,6 +43,7 @@ func NewHubManager(roomRepo domain.RoomRepository, userRepo domain.UserRepositor
 		roomRepo:       roomRepo,
 		userRepo:       userRepo,
 		trackRepo:      trackRepo,
+		playbackCache:  playbackCache,
 		ticketStore:    ticketStore,
 		allowedOrigins: originMap,
 	}
@@ -72,7 +74,7 @@ func (hm *HubManager) GetOrCreateHub(roomID string) *RoomHub {
 		return hub
 	}
 
-	hub := NewRoomHub(roomID, hm.roomRepo, hm.trackRepo, func() {
+	hub := NewRoomHub(roomID, hm.roomRepo, hm.trackRepo, hm.playbackCache, func() {
 		hm.mu.Lock()
 		delete(hm.rooms, roomID)
 		hm.mu.Unlock()
@@ -159,6 +161,7 @@ type RoomHub struct {
 	onDestroy  func()
 	roomRepo   domain.RoomRepository
 	trackRepo  domain.TrackRepository
+	playbackCache domain.PlaybackCache
 	mu         sync.RWMutex
 
 	leaveTimeout    chan leaveTimeoutMsg
@@ -166,7 +169,7 @@ type RoomHub struct {
 	leaveGenCounter int
 }
 
-func NewRoomHub(roomID string, roomRepo domain.RoomRepository, trackRepo domain.TrackRepository, onDestroy func()) *RoomHub {
+func NewRoomHub(roomID string, roomRepo domain.RoomRepository, trackRepo domain.TrackRepository, playbackCache domain.PlaybackCache, onDestroy func()) *RoomHub {
 	return &RoomHub{
 		RoomID:        roomID,
 		Clients:       make(map[*Client]bool),
@@ -178,6 +181,7 @@ func NewRoomHub(roomID string, roomRepo domain.RoomRepository, trackRepo domain.
 		onDestroy:     onDestroy,
 		roomRepo:      roomRepo,
 		trackRepo:     trackRepo,
+		playbackCache: playbackCache,
 	}
 }
 
@@ -378,6 +382,7 @@ func (h *RoomHub) destroyRoom() {
 	}
 
 	_ = h.roomRepo.Delete(h.RoomID)
+	_ = h.playbackCache.DeletePlaybackState(h.RoomID)
 
 	h.mu.Lock()
 	h.Clients = make(map[*Client]bool)
@@ -388,11 +393,33 @@ func (h *RoomHub) destroyRoom() {
 	}
 }
 
+// currentPlaybackSnapshot reads the live state, preferring Redis (fast,
+// freshest) and falling back to MySQL if the cache is empty (e.g. right
+// after a server restart before anyone has synced yet).
+func (h *RoomHub) currentPlaybackSnapshot() (domain.PlaybackState, int, *string) {
+	if snapshot, err := h.playbackCache.GetPlaybackState(h.RoomID); err == nil && snapshot != nil {
+		return snapshot.PlaybackState, snapshot.PlaybackPositionMS, snapshot.CurrentTrackID
+	}
+	room, err := h.roomRepo.GetByID(h.RoomID)
+	if err != nil || room == nil {
+		return domain.PlaybackStatePaused, 0, nil
+	}
+	return room.PlaybackState, room.PlaybackPositionMS, room.CurrentTrackID
+}
+
 // pauseRoomOnDisconnect pauses playback in DB and broadcasts CHANGE_STATE to
 // all clients so their players stop immediately. Position is intentionally NOT
 // reset — everyone resumes from where they left off when someone clicks play.
 func (h *RoomHub) pauseRoomOnDisconnect(userID, username, role string) {
-	_ = h.roomRepo.UpdatePlaybackState(h.RoomID, domain.PlaybackStatePaused, nil, nil)
+	_, currentPos, _ := h.currentPlaybackSnapshot()
+
+	// Fast path: Redis, this is what every client's next INITIAL_STATE read relies on.
+	_ = h.playbackCache.SetPlaybackState(h.RoomID, domain.PlaybackStatePaused, currentPos, nil)
+
+	// Slow path: MySQL, off the hot path.
+	go func() {
+		_ = h.roomRepo.UpdatePlaybackState(h.RoomID, domain.PlaybackStatePaused, nil, nil)
+	}()
 
 	h.broadcastEvent(WSMessage{
 		Type: EventChangeState,
@@ -433,22 +460,34 @@ func (h *RoomHub) BroadcastMessage(msg WSMessage) {
 	h.broadcastEvent(msg)
 }
 
+// sendInitialState loads the room from MySQL (for full data: tracks, members,
+// lyrics, etc.) then overlays the live playback fields from Redis, since
+// MySQL's copy of those specific fields can briefly lag behind (see
+// EventSyncPlayback / EventChangeState below).
 func (h *RoomHub) sendInitialState(client *Client) {
-    room, err := h.roomRepo.GetByID(h.RoomID)
-    if err != nil || room == nil {
-        return
-    }
+	room, err := h.roomRepo.GetByID(h.RoomID)
+	if err != nil || room == nil {
+		return
+	}
 
-    initialMsg := WSMessage{
-        Type: EventInitialState,
-        Payload: map[string]interface{}{
-            "room": room,
-        },
-    }
-    bytes, err := json.Marshal(initialMsg)
-    if err == nil {
-        client.Send <- bytes
-    }
+	if snapshot, err := h.playbackCache.GetPlaybackState(h.RoomID); err == nil && snapshot != nil {
+		room.PlaybackState = snapshot.PlaybackState
+		room.PlaybackPositionMS = snapshot.PlaybackPositionMS
+		if snapshot.CurrentTrackID != nil {
+			room.CurrentTrackID = snapshot.CurrentTrackID
+		}
+	}
+
+	initialMsg := WSMessage{
+		Type: EventInitialState,
+		Payload: map[string]interface{}{
+			"room": room,
+		},
+	}
+	bytes, err := json.Marshal(initialMsg)
+	if err == nil {
+		client.Send <- bytes
+	}
 }
 
 func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []byte) {
@@ -488,7 +527,20 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 			if state != domain.PlaybackStatePlaying && state != domain.PlaybackStatePaused {
 				state = domain.PlaybackStatePaused
 			}
-			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, &payload.PlaybackPositionMS, payload.CurrentTrackID)
+			positionMS := payload.PlaybackPositionMS
+			currentTrackID := payload.CurrentTrackID
+
+			// Fast path: this is what gets broadcast below and what every
+			// new INITIAL_STATE read (sendInitialState) sees.
+			_ = h.playbackCache.SetPlaybackState(h.RoomID, state, positionMS, currentTrackID)
+
+			// Slow path: MySQL persistence, off the hot path so a slow
+			// query never delays this broadcast (this is the exact call
+			// that used to show up in the slow query log).
+			go func() {
+				posCopy := positionMS
+				_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, &posCopy, currentTrackID)
+			}()
 		}
 
 		payload.Timestamp = time.Now().UnixMilli()
@@ -507,7 +559,20 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 
 		if client.Role == "host" {
 			state := domain.PlaybackState(payload.PlaybackState)
-			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, payload.PositionMS, nil)
+
+			positionMS := payload.PositionMS
+			if positionMS == nil {
+				_, currentPos, _ := h.currentPlaybackSnapshot()
+				positionMS = &currentPos
+			}
+
+			// Fast path.
+			_ = h.playbackCache.SetPlaybackState(h.RoomID, state, *positionMS, nil)
+
+			// Slow path.
+			go func() {
+				_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, payload.PositionMS, nil)
+			}()
 		}
 
 		h.broadcastEvent(WSMessage{
