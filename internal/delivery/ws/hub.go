@@ -15,10 +15,14 @@ import (
 )
 
 // memberReconnectGrace is how long we wait after any member's connection
-// drops before treating it as a real "left the room" event. This absorbs
-// page refreshes (disconnect immediately followed by a fresh reconnect)
-// without flapping the member list or deleting their DB membership.
-const memberReconnectGrace = 6 * time.Second
+// drops before treating it as a real "left the room" event. This has to
+// absorb a full page refresh in production: React unmounting, re-fetching
+// a WS ticket (which itself retries up to 3x on failure), then reopening
+// the socket — all over a real network, not localhost. 6s was fine in local
+// testing but too tight in production and was causing hosts to get treated
+// as "left" (destroying the room) and listeners to get dropped from the
+// member list on an ordinary refresh.
+const memberReconnectGrace = 20 * time.Second
 
 type HubManager struct {
 	rooms          map[string]*RoomHub
@@ -153,16 +157,16 @@ type leaveTimeoutMsg struct {
 }
 
 type RoomHub struct {
-	RoomID     string
-	Clients    map[*Client]bool
-	Broadcast  chan []byte
-	Register   chan *Client
-	Unregister chan *Client
-	onDestroy  func()
-	roomRepo   domain.RoomRepository
-	trackRepo  domain.TrackRepository
+	RoomID        string
+	Clients       map[*Client]bool
+	Broadcast     chan []byte
+	Register      chan *Client
+	Unregister    chan *Client
+	onDestroy     func()
+	roomRepo      domain.RoomRepository
+	trackRepo     domain.TrackRepository
 	playbackCache domain.PlaybackCache
-	mu         sync.RWMutex
+	mu            sync.RWMutex
 
 	leaveTimeout    chan leaveTimeoutMsg
 	pendingLeaves   map[string]*pendingLeave // keyed by UserID
@@ -202,7 +206,13 @@ func (h *RoomHub) Run() {
 			}
 
 		case message := <-h.Broadcast:
-			h.mu.RLock()
+			// Full write lock: a full client (buffer of 256 messages hasn't
+			// been drained) gets dropped from the map right here, so this
+			// must not run concurrently with any other read/write of
+			// h.Clients (an RLock here previously let two goroutines both
+			// think they held a safe read while one deleted — that's a data
+			// race and could crash the whole process under load).
+			h.mu.Lock()
 			for client := range h.Clients {
 				select {
 				case client.Send <- message:
@@ -211,7 +221,7 @@ func (h *RoomHub) Run() {
 					delete(h.Clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
@@ -444,7 +454,10 @@ func (h *RoomHub) broadcastEvent(msg WSMessage) {
 	if err != nil {
 		return
 	}
-	h.mu.RLock()
+	// Full write lock — see the comment in Run()'s broadcast case for why
+	// RLock here was a data race (this same delete-during-iteration pattern
+	// is duplicated here for the direct-call path used by most events).
+	h.mu.Lock()
 	for client := range h.Clients {
 		select {
 		case client.Send <- bytes:
@@ -453,7 +466,7 @@ func (h *RoomHub) broadcastEvent(msg WSMessage) {
 			delete(h.Clients, client)
 		}
 	}
-	h.mu.RUnlock()
+	h.mu.Unlock()
 }
 
 func (h *RoomHub) BroadcastMessage(msg WSMessage) {
