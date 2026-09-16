@@ -7,6 +7,7 @@ import (
 	"ripit-be/internal/domain"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type roomRepository struct {
@@ -82,16 +83,22 @@ func (r *roomRepository) UpdatePlaybackState(roomID string, state domain.Playbac
 }
 
 func (r *roomRepository) UpdatePlaybackSettings(roomID string, repeatMode string, isShuffled bool) error {
-    return r.db.Model(&domain.Room{}).
-        Where("id = ?", roomID).
-        Updates(map[string]interface{}{
-            "repeat_mode": repeatMode,
-            "is_shuffled": isShuffled,
-        }).Error
+	return r.db.Model(&domain.Room{}).
+		Where("id = ?", roomID).
+		Updates(map[string]interface{}{
+			"repeat_mode": repeatMode,
+			"is_shuffled": isShuffled,
+		}).Error
 }
 
+// AddMember upserts room membership: inserts a new row, or — if the user is
+// already a member (e.g. reconnecting after a page refresh) — updates their
+// role/joined_at in place instead of erroring or creating a duplicate.
 func (r *roomRepository) AddMember(member *domain.RoomMember) error {
-	return r.db.Save(member).Error
+	return r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "room_id"}, {Name: "user_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"role", "joined_at"}),
+	}).Create(member).Error
 }
 
 func (r *roomRepository) RemoveMember(roomID, userID string) error {

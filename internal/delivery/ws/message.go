@@ -17,6 +17,7 @@ const (
 	EventPing           EventType = "PING"
 	EventPong           EventType = "PONG"
 	EventHostLatency    EventType = "HOST_LATENCY"
+	EventPauseOnDisconnect EventType = "PAUSE_ON_DISCONNECT"
 )
 
 type WSMessage struct {
@@ -62,4 +63,10 @@ type PingPayload struct {
 
 type HostLatencyPayload struct {
 	LatencyMS int64 `json:"latency_ms"`
+}
+
+type PauseOnDisconnectPayload struct {
+    UserID   string `json:"user_id"`
+    Username string `json:"username"`
+    Role     string `json:"role"`
 }

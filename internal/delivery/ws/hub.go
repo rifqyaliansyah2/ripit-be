@@ -14,7 +14,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const hostReconnectGrace = 6 * time.Second
+// memberReconnectGrace is how long we wait after any member's connection
+// drops before treating it as a real "left the room" event. This absorbs
+// page refreshes (disconnect immediately followed by a fresh reconnect)
+// without flapping the member list or deleting their DB membership.
+const memberReconnectGrace = 6 * time.Second
 
 type HubManager struct {
 	rooms          map[string]*RoomHub
@@ -134,6 +138,18 @@ func (hm *HubManager) HandleWS(c *gin.Context) {
 	go client.ReadPump()
 }
 
+type pendingLeave struct {
+	timer *time.Timer
+	gen   int
+}
+
+type leaveTimeoutMsg struct {
+	userID   string
+	username string
+	role     string
+	gen      int
+}
+
 type RoomHub struct {
 	RoomID     string
 	Clients    map[*Client]bool
@@ -145,22 +161,23 @@ type RoomHub struct {
 	trackRepo  domain.TrackRepository
 	mu         sync.RWMutex
 
-	hostLeaveTimeout chan int
-	pendingHostTimer *time.Timer
-	hostLeaveGen     int
+	leaveTimeout    chan leaveTimeoutMsg
+	pendingLeaves   map[string]*pendingLeave // keyed by UserID
+	leaveGenCounter int
 }
 
 func NewRoomHub(roomID string, roomRepo domain.RoomRepository, trackRepo domain.TrackRepository, onDestroy func()) *RoomHub {
 	return &RoomHub{
-		RoomID:           roomID,
-		Clients:          make(map[*Client]bool),
-		Broadcast:        make(chan []byte),
-		Register:         make(chan *Client),
-		Unregister:       make(chan *Client),
-		hostLeaveTimeout: make(chan int),
-		onDestroy:        onDestroy,
-		roomRepo:         roomRepo,
-		trackRepo:        trackRepo,
+		RoomID:        roomID,
+		Clients:       make(map[*Client]bool),
+		Broadcast:     make(chan []byte),
+		Register:      make(chan *Client),
+		Unregister:    make(chan *Client),
+		leaveTimeout:  make(chan leaveTimeoutMsg),
+		pendingLeaves: make(map[string]*pendingLeave),
+		onDestroy:     onDestroy,
+		roomRepo:      roomRepo,
+		trackRepo:     trackRepo,
 	}
 }
 
@@ -168,81 +185,17 @@ func (h *RoomHub) Run() {
 	for {
 		select {
 		case client := <-h.Register:
-			h.mu.Lock()
-			if client.Role == "host" && h.pendingHostTimer != nil {
-				h.pendingHostTimer.Stop()
-				h.pendingHostTimer = nil
-				h.hostLeaveGen++
-			}
-			h.Clients[client] = true
-			h.mu.Unlock()
-
-			h.sendInitialState(client)
-
-			h.broadcastEvent(WSMessage{
-				Type: EventUserJoined,
-				Payload: UserPresencePayload{
-					UserID:   client.UserID,
-					Username: client.Username,
-					Role:     client.Role,
-				},
-			})
+			h.handleRegister(client)
 
 		case client := <-h.Unregister:
-			h.mu.Lock()
-			_, existed := h.Clients[client]
-			if !existed {
-				h.mu.Unlock()
-				continue
-			}
-			delete(h.Clients, client)
-			close(client.Send)
-			isHost := client.Role == "host"
-			explicit := client.ExplicitLeave
-			h.mu.Unlock()
-
-			if isHost {
-				if explicit {
-					h.destroyRoom()
-				} else {
-					h.scheduleHostLeaveGrace()
-				}
-				continue
-			}
-
-			_ = h.roomRepo.RemoveMember(h.RoomID, client.UserID)
-
-			h.broadcastEvent(WSMessage{
-				Type: EventUserLeft,
-				Payload: UserPresencePayload{
-					UserID:   client.UserID,
-					Username: client.Username,
-					Role:     client.Role,
-				},
-			})
-
-			h.mu.RLock()
-			empty := len(h.Clients) == 0
-			h.mu.RUnlock()
-
-			if empty {
-				if h.onDestroy != nil {
-					h.onDestroy()
-				}
+			if h.handleUnregister(client) {
 				return
 			}
 
-		case gen := <-h.hostLeaveTimeout:
-			h.mu.Lock()
-			if gen != h.hostLeaveGen {
-				h.mu.Unlock()
-				continue
+		case msg := <-h.leaveTimeout:
+			if h.handleLeaveTimeout(msg) {
+				return
 			}
-			h.pendingHostTimer = nil
-			h.mu.Unlock()
-
-			h.destroyRoom()
-			return
 
 		case message := <-h.Broadcast:
 			h.mu.RLock()
@@ -259,15 +212,148 @@ func (h *RoomHub) Run() {
 	}
 }
 
-func (h *RoomHub) scheduleHostLeaveGrace() {
+// handleRegister runs both for a brand-new join and for a reconnect (e.g.
+// after a page refresh). Either way, membership is upserted to the DB so it
+// never drifts out of sync with who is actually connected, and any pending
+// "leave" grace timer for this user is cancelled.
+func (h *RoomHub) handleRegister(client *Client) {
+	h.mu.Lock()
+	if pl, ok := h.pendingLeaves[client.UserID]; ok {
+		pl.timer.Stop()
+		delete(h.pendingLeaves, client.UserID)
+	}
+	h.Clients[client] = true
+	h.mu.Unlock()
+
+	_ = h.roomRepo.AddMember(&domain.RoomMember{
+		RoomID:   h.RoomID,
+		UserID:   client.UserID,
+		Role:     domain.RoomRole(client.Role),
+		JoinedAt: time.Now(),
+	})
+
+	h.sendInitialState(client)
+
+	h.broadcastEvent(WSMessage{
+		Type: EventUserJoined,
+		Payload: UserPresencePayload{
+			UserID:   client.UserID,
+			Username: client.Username,
+			Role:     client.Role,
+		},
+	})
+}
+
+// handleUnregister runs whenever a connection drops, for any reason —
+// explicit "Leave Room", tab close, or a refresh. Returns true if the hub
+// goroutine should stop (room was destroyed or emptied out).
+func (h *RoomHub) handleUnregister(client *Client) bool {
+	h.mu.Lock()
+	_, existed := h.Clients[client]
+	if !existed {
+		h.mu.Unlock()
+		return false
+	}
+	delete(h.Clients, client)
+	close(client.Send)
+
+	userID := client.UserID
+	username := client.Username
+	role := client.Role
+	explicit := client.ExplicitLeave
+	stillConnected := h.hasActiveConnectionLocked(userID)
+	h.mu.Unlock()
+
+	if stillConnected {
+		return false
+	}
+
+	// Pause the room for everyone the moment anyone disconnects.
+	// Exceptions:
+	//   - Host explicit leave → destroyRoom() handles it, no point pausing first.
+	//   - Room already in paused state → UpdatePlaybackState is idempotent so fine,
+	//     but the extra broadcast is harmless.
+	if role == "host" {
+		h.pauseRoomOnDisconnect(userID, username, role)
+	}
+
+	if !explicit {
+		h.scheduleLeaveGrace(userID, username, role)
+		return false
+	}
+
+	return h.finalizeLeave(userID, username, role)
+}
+
+func (h *RoomHub) hasActiveConnectionLocked(userID string) bool {
+	for c := range h.Clients {
+		if c.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *RoomHub) scheduleLeaveGrace(userID, username, role string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	h.hostLeaveGen++
-	gen := h.hostLeaveGen
-	h.pendingHostTimer = time.AfterFunc(hostReconnectGrace, func() {
-		h.hostLeaveTimeout <- gen
+	if existing, ok := h.pendingLeaves[userID]; ok {
+		existing.timer.Stop()
+	}
+
+	h.leaveGenCounter++
+	gen := h.leaveGenCounter
+	timer := time.AfterFunc(memberReconnectGrace, func() {
+		h.leaveTimeout <- leaveTimeoutMsg{userID: userID, username: username, role: role, gen: gen}
 	})
+	h.pendingLeaves[userID] = &pendingLeave{timer: timer, gen: gen}
+}
+
+func (h *RoomHub) handleLeaveTimeout(msg leaveTimeoutMsg) bool {
+	h.mu.Lock()
+	pl, ok := h.pendingLeaves[msg.userID]
+	if !ok || pl.gen != msg.gen {
+		h.mu.Unlock()
+		return false
+	}
+	delete(h.pendingLeaves, msg.userID)
+	h.mu.Unlock()
+
+	return h.finalizeLeave(msg.userID, msg.username, msg.role)
+}
+
+// finalizeLeave actually removes membership and notifies the room. Shared by
+// the explicit-leave path and the grace-period-expired path.
+func (h *RoomHub) finalizeLeave(userID, username, role string) bool {
+	if role == "host" {
+		h.destroyRoom()
+		return true
+	}
+
+	_ = h.roomRepo.RemoveMember(h.RoomID, userID)
+
+	h.broadcastEvent(WSMessage{
+		Type: EventUserLeft,
+		Payload: UserPresencePayload{
+			UserID:   userID,
+			Username: username,
+			Role:     role,
+		},
+	})
+
+	h.mu.RLock()
+	empty := len(h.Clients) == 0
+	h.mu.RUnlock()
+
+	if empty {
+		if h.onDestroy != nil {
+			h.onDestroy()
+		}
+		return true
+	}
+
+	return false
 }
 
 func (h *RoomHub) destroyRoom() {
@@ -276,6 +362,10 @@ func (h *RoomHub) destroyRoom() {
 	for c := range h.Clients {
 		remaining = append(remaining, c)
 	}
+	for _, pl := range h.pendingLeaves {
+		pl.timer.Stop()
+	}
+	h.pendingLeaves = make(map[string]*pendingLeave)
 	h.mu.Unlock()
 
 	h.broadcastEvent(WSMessage{
@@ -296,6 +386,30 @@ func (h *RoomHub) destroyRoom() {
 	if h.onDestroy != nil {
 		h.onDestroy()
 	}
+}
+
+// pauseRoomOnDisconnect pauses playback in DB and broadcasts CHANGE_STATE to
+// all clients so their players stop immediately. Position is intentionally NOT
+// reset — everyone resumes from where they left off when someone clicks play.
+func (h *RoomHub) pauseRoomOnDisconnect(userID, username, role string) {
+	_ = h.roomRepo.UpdatePlaybackState(h.RoomID, domain.PlaybackStatePaused, nil, nil)
+
+	h.broadcastEvent(WSMessage{
+		Type: EventChangeState,
+		Payload: ChangeStatePayload{
+			PlaybackState: "paused",
+			// PositionMS nil → frontend keeps its current local position
+		},
+	})
+
+	h.broadcastEvent(WSMessage{
+		Type: EventPauseOnDisconnect,
+		Payload: PauseOnDisconnectPayload{
+			UserID:   userID,
+			Username: username,
+			Role:     role,
+		},
+	})
 }
 
 func (h *RoomHub) broadcastEvent(msg WSMessage) {
@@ -320,21 +434,21 @@ func (h *RoomHub) BroadcastMessage(msg WSMessage) {
 }
 
 func (h *RoomHub) sendInitialState(client *Client) {
-	room, err := h.roomRepo.GetByID(h.RoomID)
-	if err != nil || room == nil {
-		return
-	}
+    room, err := h.roomRepo.GetByID(h.RoomID)
+    if err != nil || room == nil {
+        return
+    }
 
-	initialMsg := WSMessage{
-		Type: EventInitialState,
-		Payload: map[string]interface{}{
-			"room": room,
-		},
-	}
-	bytes, err := json.Marshal(initialMsg)
-	if err == nil {
-		client.Send <- bytes
-	}
+    initialMsg := WSMessage{
+        Type: EventInitialState,
+        Payload: map[string]interface{}{
+            "room": room,
+        },
+    }
+    bytes, err := json.Marshal(initialMsg)
+    if err == nil {
+        client.Send <- bytes
+    }
 }
 
 func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []byte) {
