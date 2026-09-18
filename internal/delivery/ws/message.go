@@ -18,6 +18,7 @@ const (
 	EventPong           EventType = "PONG"
 	EventHostLatency    EventType = "HOST_LATENCY"
 	EventPauseOnDisconnect EventType = "PAUSE_ON_DISCONNECT"
+	EventHostChanged    EventType = "HOST_CHANGED"
 )
 
 type WSMessage struct {
@@ -69,4 +70,11 @@ type PauseOnDisconnectPayload struct {
     UserID   string `json:"user_id"`
     Username string `json:"username"`
     Role     string `json:"role"`
+}
+
+type HostChangedPayload struct {
+	NewHostID       string `json:"new_host_id"`
+	NewHostUsername string `json:"new_host_username"`
+	OldHostID       string `json:"old_host_id"`
+	OldHostUsername string `json:"old_host_username"`
 }

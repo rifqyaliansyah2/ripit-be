@@ -65,7 +65,7 @@ CREATE TABLE `tracks` (
     `cover_url` VARCHAR(512) NOT NULL DEFAULT '',
     `lyrics` LONGTEXT NULL DEFAULT NULL,
     `has_lyrics` BOOLEAN NOT NULL DEFAULT FALSE,
-    `added_by` CHAR(36) NOT NULL,
+    `added_by` CHAR(36) NULL DEFAULT NULL,
     `sort_order` INT NOT NULL DEFAULT 0,
     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
@@ -73,7 +73,7 @@ CREATE TABLE `tracks` (
     KEY `idx_tracks_added_by` (`added_by`),
     KEY `idx_tracks_room_sort` (`room_id`, `sort_order`),
     CONSTRAINT `fk_tracks_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
-    CONSTRAINT `fk_tracks_added_by` FOREIGN KEY (`added_by`) REFERENCES `users` (`id`) ON DELETE CASCADE
+    CONSTRAINT `fk_tracks_added_by` FOREIGN KEY (`added_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Add foreign key for current_track_id on rooms

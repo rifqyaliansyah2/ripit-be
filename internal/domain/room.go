@@ -88,6 +88,7 @@ type RoomRepository interface {
 	IsCodeExists(code string) (bool, error)
 	Delete(id string) error
 	UpdatePlaybackSettings(roomID string, repeatMode string, isShuffled bool) error
+	TransferHost(roomID, oldHostID, newHostID string) error
 }
 
 // PlaybackCache is the Redis-backed store for live playback state. It's

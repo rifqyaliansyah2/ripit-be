@@ -306,3 +306,24 @@ func (m *mockRoomRepo) UpdatePlaybackSettings(roomID string, repeatMode string, 
 	}
 	return nil
 }
+
+func (m *mockRoomRepo) TransferHost(roomID, oldHostID, newHostID string) error {
+	if r, ok := m.rooms[roomID]; ok {
+		r.HostID = newHostID
+	}
+
+	members := m.members[roomID]
+	updated := make([]domain.RoomMember, 0, len(members))
+	for _, mem := range members {
+		if mem.UserID == oldHostID {
+			continue
+		}
+		if mem.UserID == newHostID {
+			mem.Role = domain.RoomRoleHost
+		}
+		updated = append(updated, mem)
+	}
+	m.members[roomID] = updated
+
+	return nil
+}

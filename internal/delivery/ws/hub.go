@@ -341,8 +341,7 @@ func (h *RoomHub) handleLeaveTimeout(msg leaveTimeoutMsg) bool {
 // the explicit-leave path and the grace-period-expired path.
 func (h *RoomHub) finalizeLeave(userID, username, role string) bool {
 	if role == "host" {
-		h.destroyRoom()
-		return true
+		return h.reassignHostOrDestroy(userID, username)
 	}
 
 	_ = h.roomRepo.RemoveMember(h.RoomID, userID)
@@ -366,6 +365,66 @@ func (h *RoomHub) finalizeLeave(userID, username, role string) bool {
 		}
 		return true
 	}
+
+	return false
+}
+
+// reassignHostOrDestroy runs when the host disconnects and the grace period
+// expires without them reconnecting. Instead of killing the room outright,
+// it promotes whichever still-connected member joined earliest to host.
+// The room is only destroyed if nobody else is left connected.
+func (h *RoomHub) reassignHostOrDestroy(oldHostID, oldHostUsername string) bool {
+	h.mu.RLock()
+	var candidates []*Client
+	for c := range h.Clients {
+		if c.UserID != oldHostID {
+			candidates = append(candidates, c)
+		}
+	}
+	h.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		h.destroyRoom()
+		return true
+	}
+
+	members, err := h.roomRepo.GetMembers(h.RoomID)
+	if err != nil {
+		// Can't determine join order safely — fail closed rather than
+		// guess wrong about who should hold the host role.
+		h.destroyRoom()
+		return true
+	}
+	joinedAt := make(map[string]time.Time, len(members))
+	for _, m := range members {
+		joinedAt[m.UserID] = m.JoinedAt
+	}
+
+	newHost := candidates[0]
+	for _, c := range candidates[1:] {
+		if joinedAt[c.UserID].Before(joinedAt[newHost.UserID]) {
+			newHost = c
+		}
+	}
+
+	if err := h.roomRepo.TransferHost(h.RoomID, oldHostID, newHost.UserID); err != nil {
+		h.destroyRoom()
+		return true
+	}
+
+	h.mu.Lock()
+	newHost.Role = "host"
+	h.mu.Unlock()
+
+	h.broadcastEvent(WSMessage{
+		Type: EventHostChanged,
+		Payload: HostChangedPayload{
+			NewHostID:       newHost.UserID,
+			NewHostUsername: newHost.Username,
+			OldHostID:       oldHostID,
+			OldHostUsername: oldHostUsername,
+		},
+	})
 
 	return false
 }
@@ -528,6 +587,11 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		})
 
 	case EventSyncPlayback:
+		if client.Role != "host" {
+			client.SendErrorMessage("Only the host can control playback")
+			return
+		}
+
 		var payload SyncPlaybackPayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
@@ -535,26 +599,19 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 			return
 		}
 
-		if client.Role == "host" {
-			state := domain.PlaybackState(payload.PlaybackState)
-			if state != domain.PlaybackStatePlaying && state != domain.PlaybackStatePaused {
-				state = domain.PlaybackStatePaused
-			}
-			positionMS := payload.PlaybackPositionMS
-			currentTrackID := payload.CurrentTrackID
-
-			// Fast path: this is what gets broadcast below and what every
-			// new INITIAL_STATE read (sendInitialState) sees.
-			_ = h.playbackCache.SetPlaybackState(h.RoomID, state, positionMS, currentTrackID)
-
-			// Slow path: MySQL persistence, off the hot path so a slow
-			// query never delays this broadcast (this is the exact call
-			// that used to show up in the slow query log).
-			go func() {
-				posCopy := positionMS
-				_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, &posCopy, currentTrackID)
-			}()
+		state := domain.PlaybackState(payload.PlaybackState)
+		if state != domain.PlaybackStatePlaying && state != domain.PlaybackStatePaused {
+			state = domain.PlaybackStatePaused
 		}
+		positionMS := payload.PlaybackPositionMS
+		currentTrackID := payload.CurrentTrackID
+
+		_ = h.playbackCache.SetPlaybackState(h.RoomID, state, positionMS, currentTrackID)
+
+		go func() {
+			posCopy := positionMS
+			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, &posCopy, currentTrackID)
+		}()
 
 		payload.Timestamp = time.Now().UnixMilli()
 		h.broadcastEvent(WSMessage{
@@ -563,6 +620,11 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		})
 
 	case EventChangeState:
+		if client.Role != "host" {
+			client.SendErrorMessage("Only the host can control playback")
+			return
+		}
+
 		var payload ChangeStatePayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
@@ -570,23 +632,19 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 			return
 		}
 
-		if client.Role == "host" {
-			state := domain.PlaybackState(payload.PlaybackState)
+		state := domain.PlaybackState(payload.PlaybackState)
 
-			positionMS := payload.PositionMS
-			if positionMS == nil {
-				_, currentPos, _ := h.currentPlaybackSnapshot()
-				positionMS = &currentPos
-			}
-
-			// Fast path.
-			_ = h.playbackCache.SetPlaybackState(h.RoomID, state, *positionMS, nil)
-
-			// Slow path.
-			go func() {
-				_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, payload.PositionMS, nil)
-			}()
+		positionMS := payload.PositionMS
+		if positionMS == nil {
+			_, currentPos, _ := h.currentPlaybackSnapshot()
+			positionMS = &currentPos
 		}
+
+		_ = h.playbackCache.SetPlaybackState(h.RoomID, state, *positionMS, nil)
+
+		go func() {
+			_ = h.roomRepo.UpdatePlaybackState(h.RoomID, state, payload.PositionMS, nil)
+		}()
 
 		h.broadcastEvent(WSMessage{
 			Type:    EventChangeState,
@@ -605,6 +663,11 @@ func (h *RoomHub) HandleIncomingMessage(client *Client, msg *WSMessage, raw []by
 		}
 
 	case EventPlaybackSettings:
+		if client.Role != "host" {
+			client.SendErrorMessage("Only the host can control playback")
+			return
+		}
+
 		var payload PlaybackSettingsPayload
 		payloadBytes, _ := json.Marshal(msg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {

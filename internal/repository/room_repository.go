@@ -152,3 +152,26 @@ func (r *roomRepository) MarkSessionStarted(roomID string) (*time.Time, error) {
 
 	return &now, nil
 }
+
+func (r *roomRepository) TransferHost(roomID, oldHostID, newHostID string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&domain.Room{}).
+			Where("id = ?", roomID).
+			Update("host_id", newHostID).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&domain.RoomMember{}).
+			Where("room_id = ? AND user_id = ?", roomID, newHostID).
+			Update("role", domain.RoomRoleHost).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("room_id = ? AND user_id = ?", roomID, oldHostID).
+			Delete(&domain.RoomMember{}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}

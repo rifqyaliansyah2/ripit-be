@@ -47,7 +47,7 @@ func (s *trackService) AddTrack(userID, roomID string, req *domain.AddTrackReque
 		CoverURL:   req.CoverURL,
 		Lyrics:     req.Lyrics,
 		HasLyrics:  hasLyrics,
-		AddedBy:    userID,
+		AddedBy:    &userID,
 		SortOrder:  maxOrder + 1,
 		CreatedAt:  time.Now(),
 	}
